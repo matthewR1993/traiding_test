@@ -29,18 +29,10 @@ def load_data(path):
         bidv = np.array(ob_gr['BidV'])
         ob_ts = np.array(ob_gr['TS'])
 
-    # TODO: delete that
-    n = 100000
-    ask = ask[:n]
-    askv = askv[:n]
-    bid = bid[:n]
-    bidv = bidv[:n]
-    ob_ts = ob_ts[:n]
-
     return ask, askv, bid, bidv, ob_ts
 
 
-def generate_features(ask, askv, bid, bidv, ob_ts):
+def generate_features(ask, askv, bid, bidv, ob_ts, selected_features=None):
     mid_price = (np.max(bid, axis=1) + np.min(ask, axis=1)) * 0.5
     time_sec = (ob_ts * 0.001).astype(int)
 
@@ -70,10 +62,9 @@ def generate_features(ask, askv, bid, bidv, ob_ts):
     ret_arr = ret_arr + [0] * (mid_price.shape[0] - len(ret_arr))
     ret_arr = np.array(ret_arr)
 
-    tail_size = 2000
-
     feat_list = []
 
+    tail_size = 2000
     lags = [50, 75, 100, 250, 500]
 
     for n in range(len(mid_price)):
@@ -104,26 +95,26 @@ def generate_features(ask, askv, bid, bidv, ob_ts):
 
     feat_df = pd.concat([feat_df, pd.DataFrame(feat_dict)], axis=1)
     feat_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    if selected_features is not None:
+        feat_df = feat_df[selected_features]
     return feat_df, ret_arr
 
 
-def prepare_train_test(feat_df, ret_arr):
+def prepare_train_test(feat_df, ret_arr, filter_features=True):
     # shuffle
     feat_df['label'] = ret_arr
     feat_df = feat_df.sample(frac=1)
 
     # Removing correlated features.
-    X_train_df = feat_df.drop(columns=['label'])
-    _, feature_pairs = handling_correlation(X_train_df, threshold=0.8)
-    features_to_remove = remove_corr_from_pairs(feature_pairs)
-    print('features_to_remove:', features_to_remove)
+    if filter_features:
+        X_train_df = feat_df.drop(columns=['label'])
+        _, feature_pairs = handling_correlation(X_train_df, threshold=0.8)
+        features_to_remove = remove_corr_from_pairs(feature_pairs)
+        selected_features = list(set(list(feat_df.drop(columns=['label']).columns)) - set(features_to_remove))
+        selected_features.sort()
+        feat_df = feat_df[selected_features + ['label']]
 
-    selected_features = list(set(list(feat_df.drop(columns=['label']).columns)) - set(features_to_remove))
-    selected_features.sort()
-    print('selected_features:', len(selected_features), selected_features)
-
-    feat_df = feat_df[selected_features + ['label']]
-
+    feat_list = list(feat_df.drop(columns=['label']).columns)
     del X_train_df
     gc.collect()
 
@@ -147,14 +138,14 @@ def prepare_train_test(feat_df, ret_arr):
     y_train = X_train['label'].values
     X_train = X_train.drop(columns=['label'])
 
-    return X_train, y_train, X_val, y_val
+    return X_train, y_train, X_val, y_val, feat_list
 
 
 def train_model(X_train, y_train, X_val, y_val):
     hyper_params = {
         "learning_rate": 0.9,
         "max_depth": 10,
-        "num_iterations": 4000,
+        "num_iterations": 2000,
         "metric": 'mse'
     }
 
@@ -179,30 +170,29 @@ def train_model(X_train, y_train, X_val, y_val):
 
     opt_coef = coef_arr[np.argmax(score_list)]
     print('opt_coef:', opt_coef)
-    print('opt_score:', opt_score)
+    print('opt_score:', np.max(score_list))
 
     return model, opt_coef
 
 
 if args.run_mode == 'train':
-    ask, askv, bid, bidv, ob_ts = load_data(path)
+    ask, askv, bid, bidv, ob_ts = load_data(args.train_data_path)
     feat_df, ret_arr = generate_features(ask, askv, bid, bidv, ob_ts)
-    X_train, y_train, X_val, y_val = prepare_train_test(feat_df, ret_arr)
+    X_train, y_train, X_val, y_val, feature_list = prepare_train_test(feat_df, ret_arr)
     model, opt_coef  = train_model(X_train, y_train, X_val, y_val)
 
     save_obj = {
         'model': model,
-        'scale_coef': opt_coef
+        'scale_coef': opt_coef,
+        'feature_list': feature_list
     }
     joblib.dump(save_obj, 'model.data')
 
 elif args.run_mode == 'predict':
-    # TODO
-    model_data = joblib.load('')
-
-    ask, askv, bid, bidv, ob_ts = load_data(path)
-    feat_df, ret_arr = generate_features(ask, askv, bid, bidv, ob_ts)
-
+    model_data = joblib.load(args.model_path)
+    ask, askv, bid, bidv, ob_ts = load_data(args.predict_data_path)
+    feat_df, ret_arr = generate_features(ask, askv, bid, bidv,
+                                         ob_ts, selected_features=model_data['feature_list'])
     X = feat_df.values
     returns = model_data['model'].predict(X) * model_data['scale_coef']
 
